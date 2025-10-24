@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>لوحة تداول لايف — 3 استراتيجيات (WS)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css">
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root{
+    --bg:#0b1220; --panel:#0f1724; --line:#16202b; --text:#dfe7ef;
+    --ok:#0f8b4f; --bad:#b02b2b; --muted:#93a6bb; --chip:#071a28;
+  }
+  body{margin:0;background:var(--bg);color:var(--text);font-family:Tajawal,Arial}
+  header{display:flex;gap:10px;align-items:center;border-bottom:1px solid var(--line);padding:10px;background:var(--panel)}
+  header h1{font-size:16px;margin:0}
+  .controls{display:flex;gap:8px;align-items:center;margin-inline-start:auto}
+  select,input,button{background:#0c1626;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  button.primary{background:#12314e}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:12px}
+  .layout{display:flex;gap:12px;padding:12px}
+  .left{flex:1;min-width:640px}
+  .right{width:380px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:12px}
+  #chart{height:520px}
+  #rsiPane{height:120px;margin-top:6px}
+  .tabs{display:flex;gap:8px;margin-bottom:8px}
+  .tab{padding:8px 10px;border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;background:#0c1626;cursor:pointer}
+  .tab.active{background:#0a223a}
+  .table{width:100%;border-collapse:collapse;font-size:13px}
+  .table th,.table td{border-bottom:1px solid var(--line);padding:6px;white-space:nowrap}
+  .ok{color:#9af7c2} .bad{color:#ffb3b3}
+  .signal{font-weight:bold;padding:2px 6px;border-radius:6px}
+  .signal.buy{background:#0e4631} .signal.sell{background:#582025}
+  .row{display:flex;gap:6px;align-items:center;margin:6px 0}
+  .muted{color:var(--muted);font-size:12px}
+  .warn{color:#ffcc66;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>لوحة تداول لايف — Binance WebSocket</h1>
+  <div class="controls">
+    <select id="symbol"><option>BTCUSDT</option><option>ETHUSDT</option></select>
+    <select id="interval">
+      <option value="1m">1m</option><option value="3m">3m</option>
+      <option value="5m">5m</option><option value="15m" selected>15m</option><option value="30m">30m</option>
+    </select>
+    <select id="strategy">
+      <option value="trend">#1 TrendSwitch (Donchian+RSI)</option>
+      <option value="swing">#2 Swing Peaks/Troughs</option>
+      <option value="monthly">#3 Monthly Swing</option>
+    </select>
+    <label class="muted"><input type="checkbox" id="realMode"/> تنفيذ حقيقي</label>
+    <input id="qty" type="number" step="0.01" value="50" style="width:110px" title="حجم بالـ USDT (quoteOrderQty)"> 
+    <button id="start" class="primary">تشغيل</button>
+    <button id="stop">إيقاف</button>
+  </div>
+</header>
+
+<div class="chips" style="padding:8px 12px">
+  <div class="chip">آخر إشارة: <span id="lastSig">—</span></div>
+  <div class="chip">RSI: <b id="rsiVal">—</b></div>
+  <div class="chip">دعم (Donchian): <b id="dcLow">—</b></div>
+  <div class="chip">مقاومة (Donchian): <b id="dcHigh">—</b></div>
+  <div class="chip">قوة الترند: <b id="trendStr">—</b></div>
+  <div class="chip">PNL الإجمالي: <b id="pnlTotal">0</b> USDT</div>
+</div>
+
+<div class="layout">
+  <div class="left">
+    <div class="card">
+      <div id="chart"></div>
+      <div id="rsiPane"></div>
+      <div class="warn">⚠ “تنفيذ حقيقي” يرسل الطلبات إلى <code>/api/order</code> على خادمك المحلي. لا تضع مفاتيحك في الصفحة.</div>
+    </div>
+    <div class="card">
+      <div class="tabs">
+        <div class="tab active" data-tab="settings">الإعدادات</div>
+        <div class="tab" data-tab="trades">الصفقات</div>
+      </div>
+
+      <!-- تبويب الإعدادات -->
+      <div id="tab-settings">
+        <div class="row">
+          <b style="min-width:140px">Donchian Len (#1):</b>
+          <input id="donLen" type="number" value="20" style="width:90px">
+          <b style="margin-inline-start:10px">RSI Len:</b>
+          <input id="rsiLen" type="number" value="14" style="width:90px">
+          <span class="muted">إشارة #1 على أول شمعة تُغلق خارج القناة مع RSI>50 للشراء وRSI<50 للبيع</span>
+        </div>
+        <div class="row">
+          <b style="min-width:140px">Fractal Sens. (#2):</b>
+          <input id="fracL" type="number" value="2" style="width:90px">
+          <span class="muted">قمّة/قاع مؤكد = شمعتان على اليمين واليسار أعلى/أخفض</span>
+        </div>
+        <div class="row">
+          <b style="min-width:140px">Monthly Win Target (#3):</b>
+          <input id="targetX" type="number" step="0.01" value="1.10" style="width:90px">
+          <b style="margin-inline-start:10px">Reverse عند خسارة:</b>
+          <input id="revLoss" type="number" step="0.01" value="0.30" style="width:90px">
+          <span class="muted">الهدف 1.10 = +10% (يمكن جعله 10.0 إن أردت “10x”)</span>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="useATRtrail"/> وقف متحرك ATR x</label>
+          <input id="atrMult" type="number" step="0.1" value="1.5" style="width:70px">
+        </div>
+      </div>
+
+      <!-- تبويب الصفقات -->
+      <div id="tab-trades" style="display:none">
+        <table class="table" id="tradesTbl">
+          <thead>
+            <tr>
+              <th>#</th><th>الوقت دخول</th><th>نوع</th><th>سعر الدخول</th><th>الهدف/الوقف</th><th>الوقت خروج</th><th>سعر الخروج</th><th>PNL $</th><th>PNL %</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="card">
+      <div><b>حالة الاتصال</b>: <span id="conn">متوقف</span></div>
+      <div class="muted">WebSocket + تحديث احتياطي كل 5 ثواني</div>
+    </div>
+    <div class="card">
+      <div><b>ملاحظات</b></div>
+      <div class="muted">الإشارات مرسومة على أول شمعة يتحقق فيها الشرط. عند “تنفيذ حقيقي” تُرسل أوامر Market بقيمة <code>quoteOrderQty</code> حسب خانة الحجم.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/*** أدوات عامة ***/
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+function fmt(n, d=2){ return (n===null||n===undefined)?'—':Number(n).toFixed(d); }
+function now(){ return new Date().toLocaleTimeString(); }
+function pushRow(t){ $('#tradesTbl tbody').insertAdjacentHTML('afterbegin', t); }
+function setConn(s){ $('#conn').textContent = s; }
+
+/*** إعداد الرسم ***/
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+  layout:{ background:{type:'solid', color:'#071021'}, textColor:'#dfe7ef'},
+  rightPriceScale:{ borderVisible:false},
+  timeScale:{ borderVisible:false, timeVisible:true, secondsVisible:false },
+  grid:{ vertLines:{color:'#0b1726'}, horzLines:{color:'#0b1726'}},
+  autoSize:true,
+});
+const candles = chart.addCandlestickSeries({
+  upColor:'#26a69a', downColor:'#ef5350', borderUpColor:'#26a69a', borderDownColor:'#ef5350', wickUpColor:'#26a69a', wickDownColor:'#ef5350'
+});
+const donTop = chart.addLineSeries({color:'#f5a142', lineWidth:2});
+const donBot = chart.addLineSeries({color:'#3aa0ff', lineWidth:2});
+
+const rsiPane = LightweightCharts.createChart(document.getElementById('rsiPane'), {
+  layout:{ background:{type:'solid', color:'#061425'}, textColor:'#c8d6e5'},
+  rightPriceScale:{ borderVisible:false}, timeScale:{ borderVisible:false, timeVisible:true, secondsVisible:false },
+  grid:{ vertLines:{color:'#0b1726'}, horzLines:{color:'#0b1726'}},
+  autoSize:true,
+});
+const rsiLine = rsiPane.addLineSeries({color:'#8bc34a', lineWidth:2});
+const rsi30 = rsiPane.addLineSeries({color:'#3a5', lineWidth:1}); const rsi70 = rsiPane.addLineSeries({color:'#a53', lineWidth:1});
+
+/*** حالة التطبيق ***/
+let ws=null, wsKey='';
+let candlesArr=[];    // {time, open, high, low, close}
+let lastKlineClosedTs=0;
+let pnlTotal=0, tradeId=0;
+let openPos=null;     // {side, entry, ts, target, sl}
+let lastSignal=null;  // {type, time, price}
+
+/*** أدوات حسابية ***/
+function ema(arr, p){ if(arr.length<p) return null; let k=2/(p+1), ema=arr[0]; for(let i=1;i<arr.length;i++) ema = arr[i]k + ema(1-k); return ema; }
+function rsi(vals, len){
+  if(vals.length<len+1) return null;
+  let gains=0,loss=0;
+  for(let i=vals.length-len;i<vals.length;i++){
+    const ch=vals[i]-vals[i-1]; if(ch>0) gains+=ch; else loss-=ch;
+  }
+  if(loss===0) return 100; const rs=gains/len/(loss/len); return 100-(100/(1+rs));
+}
+function donchian(arr, len){
+  if(arr.length<len) return null;
+  let hi=-Infinity, lo=Infinity;
+  for(let i=arr.length-len;i<arr.length;i++){ hi=Math.max(hi, arr[i].high); lo=Math.min(lo, arr[i].low); }
+  return {upper:hi, lower:lo};
+}
+function fractalPeaks(arr, L=2){ // returns last confirmed {peak?, price}
+  if(arr.length<2*L+1) return null;
+  const n=arr.length-1-L;
+  let peak=true, trough=true;
+  const mid=arr[n];
+  for(let i=n-L;i<=n+L;i++){
+    if(arr[i].high>mid.high) peak=false;
+    if(arr[i].low<mid.low) trough=false;
+  }
+  return {peak: peak? mid.high:null, trough: trough? mid.low:null, ts: mid.time};
+}
+function monthlyLow(arr){ // آخر 30 يوم بناءً على الكلاين الحالي (تقريباً)
+  let lo=Infinity, hi=-Infinity; for(const k of arr){ lo=Math.min(lo,k.low); hi=Math.max(hi,k.high); }
+  return {low:lo, high:hi};
+}
+
+/*** رسم خطوط RSI 30/70 ***/
+function drawRsiBands(){
+  if(candlesArr.length===0) return;
+  const t = candlesArr.map(k=>({time:k.time, value:30}));
+  const t2= candlesArr.map(k=>({time:k.time, value:70}));
+  rsi30.setData(t); rsi70.setData(t2);
+}
+
+/*** إشارات على أول شمعة ***/
+function addSignalMarker(type, k){
+  candles.setMarkers([{ time:k.time, position:type==='BUY'?'belowBar':'aboveBar', color:type==='BUY'?'green':'red', shape:type==='BUY'?'arrowUp':'arrowDown', text:type }]);
+  $('#lastSig').textContent = ${type} @ ${fmt(k.close)};
+  lastSignal={type, time:k.time, price:k.close};
+}
+
+/*** تنفيذ ورقي/حقيقي ***/
+async function execOrder(side, price){
+  const real = $('#realMode').checked;
+  const qty = Math.max(0.001, Number($('#qty').value||0));
+  if(!real){ return {paper:true}; }
+  // إرسال إلى خادمك المحلي
+  const body = { symbol: $('#symbol').value, side, type:'MARKET', quoteOrderQty: String(qty) };
+  try{
+    const r = await fetch('/api/order',{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    return await r.json();
+  }catch(e){ console.error(e); return {error:e.message}; }
+}
+
+/*** منطق الاستراتيجيات ***/
+function strategyTrendSwitch(){
+  const len=Number($('#donLen').value||20), rlen=Number($('#rsiLen').value||14);
+  const dc = donchian(candlesArr, len); if(!dc) return;
+  const k = candlesArr[candlesArr.length-1];
+  const closes = candlesArr.map(x=>x.close);
+  const r = rsi(closes, rlen);
+  $('#rsiVal').textContent = r?fmt(r):'—'; $('#dcLow').textContent=fmt(dc.lower); $('#dcHigh').textContent=fmt(dc.upper);
+
+  if(!k || !r) return;
+  // أول شمعة تغلق خارج القناة + فلتر RSI
+  if(!openPos && k.close>dc.upper && r>50){
+    addSignalMarker('BUY',k);
+    openPos={side:'BUY', entry:k.close, ts:k.time};
+    execOrder('BUY',k.close);
+  }else if(!openPos && k.close<dc.lower && r<50){
+    addSignalMarker('SELL',k);
+    openPos={side:'SELL', entry:k.close, ts:k.time};
+    execOrder('SELL',k.close);
+  }
+  if(openPos){
+    const atrTrail = $('#useATRtrail').checked ? Number($('#atrMult').value||1.5) : null;
+    let exit=false;
+    if(openPos.side==='BUY' && k.close<dc.lower) exit=true;
+    if(openPos.side==='SELL' && k.close>dc.upper) exit=true;
+    if(atrTrail){ /* يمكن توسيع ATR الحقيقي لاحقاً */ }
+    if(exit){
+      const pnl = (openPos.side==='BUY'? (k.close-openPos.entry): (openPos.entry-k.close));
+      finalizeTrade(k, pnl);
+    }
+  }
+}
+
+function strategySwing(){
+  const L = Number($('#fracL').value||2);
+  const fp = fractalPeaks(candlesArr, L); if(!fp) return;
+  const k = candlesArr[candlesArr.length-1];
+  if(!openPos){
+    if(fp.trough){ addSignalMarker('BUY',k); openPos={side:'BUY', entry:k.close, ts:k.time}; execOrder('BUY',k.close); }
+    if(fp.peak){ addSignalMarker('SELL',k); openPos={side:'SELL', entry:k.close, ts:k.time}; execOrder('SELL',k.close); }
+  }else{
+    // إغلاق عند القمة/القاع المؤكد التالي
+    if(openPos.side==='BUY' && fp.peak){
+      const pnl = k.close - openPos.entry; finalizeTrade(k, pnl);
+    }else if(openPos.side==='SELL' && fp.trough){
+      const pnl = openPos.entry - k.close; finalizeTrade(k, pnl);
+    }
+  }
+}
+
+function strategyMonthly(){
+  const k = candlesArr[candlesArr.length-1];
+  const closes = candlesArr.map(x=>x.close);
+  const month = monthlyLow(candlesArr);
+  const targetX = Number($('#targetX').value||1.10);
+  const rev = Number($('#revLoss').value||0.30);
+
+  if(!openPos){
+    // شراء قرب قاع الشهر (<= 1% فوق القاع)
+    if(k.close <= month.low*1.01){
+      addSignalMarker('BUY',k);
+      openPos={side:'BUY', entry:k.close, target:k.close*targetX, reverse: k.close*(1-rev)};
+      execOrder('BUY',k.close);
+    }
+    // بيع قرب قمة الشهر (>= 1% تحت القمة)
+    else if(k.close >= month.high*0.99){
+      addSignalMarker('SELL',k);
+      openPos={side:'SELL', entry:k.close, target:k.close/targetX, reverse: k.close*(1+rev)};
+      execOrder('SELL',k.close);
+    }
+  }else{
+    let exit=false, pnl=0;
+    if(openPos.side==='BUY'){
+      if(k.close>=openPos.target){ exit=true; pnl = k.close-openPos.entry; }
+      else if(k.close<=openPos.reverse){ // عكس إلى بيع
+        const revp = openPos.entry - k.close; finalizeTrade(k, revp, true);
+        addSignalMarker('SELL',k); openPos={side:'SELL', entry:k.close, target:k.close/targetX, reverse:k.close*(1+rev)}; execOrder('SELL',k.close);
+        return;
+      }
+    }else if(openPos.side==='SELL'){
+      if(k.close<=openPos.target){ exit=true; pnl = openPos.entry-k.close; }
+      else if(k.close>=openPos.reverse){
+        const revp = k.close - openPos.entry; finalizeTrade(k, revp, true);
+        addSignalMarker('BUY',k); openPos={side:'BUY', entry:k.close, target:k.close*targetX, reverse:k.close*(1-rev)}; execOrder('BUY',k.close);
+        return;
+      }
+    }
+    if(exit){ finalizeTrade(k, pnl); }
+  }
+}
+
+/*** إنهاء صفقة وتسجيلها ***/
+function finalizeTrade(k, pnl, isReverse=false){
+  pnlTotal += pnl;
+  const pct = (pnl / openPos.entry) * 100;
+  const id = ++tradeId;
+  $('#pnlTotal').textContent = fmt(pnlTotal, 4);
+  pushRow(`
+    <tr>
+      <td>${id}</td>
+      <td>${new Date(openPos.ts*1000).toLocaleTimeString()}</td>
+      <td>${openPos.side}</td>
+      <td>${fmt(openPos.entry)}</td>
+      <td>${openPos.target? fmt(openPos.target): '—'}</td>
+      <td>${new Date(k.time*1000).toLocaleTimeString()}</td>
+      <td>${fmt(k.close)}</td>
+      <td class="${pnl>=0?'ok':'bad'}">${fmt(pnl,4)}</td>
+      <td class="${pnl>=0?'ok':'bad'}">${fmt(pct,2)}%</td>
+    </tr>
+  `);
+  openPos=null;
+  $('#lastSig').textContent = (isReverse?'Reverse: ':'Exit: ')+fmt(k.close);
+}
+
+/*** Tabs ***/
+$$('.tab').forEach(t=>t.onclick=()=>{
+  $$('.tab').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');
+  const name = t.dataset.tab;
+  document.querySelector('#tab-settings').style.display = (name==='settings'?'block':'none');
+  document.querySelector('#tab-trades').style.display = (name==='trades'?'block':'none');
+});
+
+/*** WebSocket + احتياطي REST كل 5 ثواني ***/
+async function fetchKlinesREST(symbol, interval, limit=500){
+  const u = https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit};
+  const r = await fetch(u); const j = await r.json();
+  return j.map(a=>({time: Math.floor(a[0]/1000), open:+a[1], high:+a[2], low:+a[3], close:+a[4]}));
+}
+let restTimer=null;
+async function restRefresh(){
+  const s=$('#symbol').value, i=$('#interval').value;
+  const data = await fetchKlinesREST(s,i,500);
+  candlesArr = data;
+  renderAll();
+}
+function renderAll(){
+  candles.setData(candlesArr);
+  const closes = candlesArr.map(x=>x.close);
+  const r = rsi(closes, Number($('#rsiLen').value||14));
+  if(r){ $('#rsiVal').textContent = fmt(r); rsiLine.setData(candlesArr.map((k,idx)=>({time:k.time, value: idx>0? rsi(closes.slice(0,idx+1), Number($('#rsiLen').value||14)) || 50 : 50}))); }
+  drawRsiBands();
+
+  const dc = donchian(candlesArr, Number($('#donLen').value||20));
+  if(dc){
+    $('#dcLow').textContent=fmt(dc.lower); $('#dcHigh').textContent=fmt(dc.upper);
+    donTop.setData(candlesArr.map(k=>({time:k.time, value:dc.upper})));
+    donBot.setData(candlesArr.map(k=>({time:k.time, value:dc.lower})));
+  }
+
+  // تقدير قوة الترند = المسافة من منتصف قناة الدونشيان
+  if(dc){
+    const last=candlesArr[candlesArr.length-1];
+    const mid=(dc.upper+dc.lower)/2; const dist=Math.abs(last.close-mid)/(dc.upper-dc.lower+1e-9);
+    $('#trendStr').textContent = dist>0.66?'قوي': dist>0.33?'متوسط':'ضعيف';
+  }
+
+  const strat=$('#strategy').value;
+  if(strat==='trend') strategyTrendSwitch();
+  else if(strat==='swing') strategySwing();
+  else strategyMonthly();
+}
+
+/*** بدء/إيقاف ***/
+$('#start').onclick = async ()=>{
+  if(ws){ try{ ws.close(); }catch{} ws=null; }
+  await restRefresh(); // تهيئة أولية
+  setConn('يتصل…');
+  const s=$('#symbol').value.toLowerCase();
+  const i=$('#interval').value;
+  const url = wss://stream.binance.com:9443/ws/${s}@kline_${i};
+  ws = new WebSocket(url);
+  ws.onopen = ()=>{ setConn('متصل'); if(restTimer) clearInterval(restTimer); restTimer = setInterval(restRefresh, 5000); };
+  ws.onclose = ()=>{ setConn('منقطع'); if(restTimer) clearInterval(restTimer); };
+  ws.onerror = ()=> setConn('خطأ');
+  ws.onmessage = (ev)=>{
+    const d = JSON.parse(ev.data);
+    if(!d.k) return;
+    const k = d.k;
+    const c = { time: Math.floor(k.t/1000), open:+k.o, high:+k.h, low:+k.l, close:+k.c };
+    // تحديث الشمعة الأخيرة أثناء التكوّن
+    if(candlesArr.length && candlesArr[candlesArr.length-1].time===c.time){
+      candlesArr[candlesArr.length-1]=c;
+    }else{
+      candlesArr.push(c);
+      // عند إغلاق الشمعة: نحسب الإشارة على "أول شمعة"
+      if(k.x){ /* مغلقة */ }
+    }
+    renderAll();
+  };
+};
+
+$('#stop').onclick = ()=>{
+  if(ws){ try{ ws.close(); }catch{} }
+  if(restTimer) clearInterval(restTimer);
+  setConn('متوقف');
+};
+</script>
+</body>
+</html>
